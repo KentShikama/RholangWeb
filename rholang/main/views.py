@@ -1,24 +1,65 @@
-import subprocess
+from subprocess import Popen
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
 from django import forms
 from django.forms import Form
-from django.shortcuts import render, get_object_or_404
+from django.shortcuts import render
+
+from . import runner
+
+# TODO: get jar from django config
+EXAMPLES = 'rchain/rholang/examples'
+COMPILER_JAR = 'rchain/rholang/target/scala-2.12/rholang-assembly-0.1-SNAPSHOT.jar'
+VM_PROGRAM = 'rchain/rosette/build.out/src/rosette'
 
 
 def home(request):
+    examples = [
+        dict(name=ex.name, src=ex.open().read())
+        for ex in Path(EXAMPLES).glob('*.rho')
+    ]
+
     if request.POST:
         compilerForm = CompilerForm(request.POST)
         if compilerForm.is_valid():
-            input = compilerForm.cleaned_data.get('rho')
-            with open('test.rho', 'w') as f:
-                f.write("%s\n" % str(input))
-            sbt_output = subprocess.check_output("bash sbt.sh", shell=True)
-            rbl_output = subprocess.check_output("bash rosette.sh", shell=True)
+            rho = compilerForm.cleaned_data.get('rho')
+
+            try:
+                compiler = runner.Compiler.make(
+                    Path(COMPILER_JAR), Path, TemporaryDirectory, Popen)
+            except runner.ConfigurationError as oops:
+                raise  # TODO: HTTP 500
+
+            try:
+                rbl = compiler.compile_text(rho)
+                compile_error = None
+            except runner.UserError as oops:
+                rbl = None
+                compile_error = str(oops)
+
+            session = None
+            run_error = None
+
+            if rbl is not None:
+                vm = runner.VM.make(Path(VM_PROGRAM), Popen)
+                _warnings, _preamble, session = vm.run_repl(rbl)
+                run_error = None  # TODO
     else:
         compilerForm = CompilerForm()
-        sbt_output = "Please enter a valid Rholang program"
-        rbl_output = "Please enter a valid Rholang program"
-    return render(request, "index.html", {"form": compilerForm, "sbt_output": sbt_output, "rbl_output": rbl_output})
+        rbl = "Compiler standing by..."
+        compile_error = None
+        session = "VM standing by..."
+        run_error = None
+    return render(request, "index.html", {
+        "form": compilerForm,
+        "examples": examples,
+        "rbl_code": rbl or '',
+        "compile_error": compile_error or '',
+        "repl_session": session or '',
+        "run_error": run_error or '',
+    })
+
 
 class CompilerForm(Form):
     rho = forms.CharField(widget=forms.Textarea)
